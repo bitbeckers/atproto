@@ -1,0 +1,367 @@
+import { useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { Agent } from '@atproto/api'
+import { useAuthContext } from '../auth/auth-provider.tsx'
+import { SDS_SERVER_URL } from '../constants.ts'
+import { addSdsLexicons } from '../lib/sds-lexicons.ts'
+import {
+  Repository,
+  useRepositoryContext,
+} from '../contexts/repository-context.tsx'
+import {
+  useCreateRecordMutation,
+  useListOrganizationsQuery,
+} from '../queries/use-sds-queries.ts'
+import { useListCollaboratorsQuery } from '../queries/use-collaboration-queries.ts'
+import { retryApiCall } from '../utils/api-retry.ts'
+import { Button } from './button.tsx'
+import { Spinner } from './spinner.tsx'
+import { CollaborationModal } from './collaboration-modal.tsx'
+import { PermissionBadge } from './permission-badge.tsx'
+import { RepositoryCard } from './repository-card.tsx'
+import { CollaborationDebug } from './collaboration-debug.tsx'
+
+export function RepositoryDashboard() {
+  const auth = useAuthContext()
+  const { session } = auth
+  const { repositories, addRepository, setSelectedRepo } =
+    useRepositoryContext()
+  const [loading, setLoading] = useState(false)
+  const [selectedRepo, setSelectedRepoLocal] = useState<string | null>(null)
+  const [newPostText, setNewPostText] = useState('')
+  const [showCreateOrg, setShowCreateOrg] = useState(false)
+  const [newOrgName, setNewOrgName] = useState('')
+  const [newOrgDescription, setNewOrgDescription] = useState('')
+  const [collaborationModal, setCollaborationModal] = useState<{
+    isOpen: boolean
+    repositoryDid: string
+    repositoryHandle: string
+  }>({
+    isOpen: false,
+    repositoryDid: '',
+    repositoryHandle: '',
+  })
+
+  const createRecordMutation = useCreateRecordMutation()
+  const organizationsQuery = useListOrganizationsQuery()
+
+  // Helper functions for collaboration modal
+  const openCollaborationModal = (repositoryDid: string, repositoryHandle: string) => {
+    setCollaborationModal({
+      isOpen: true,
+      repositoryDid,
+      repositoryHandle,
+    })
+  }
+
+  const closeCollaborationModal = () => {
+    setCollaborationModal({
+      isOpen: false,
+      repositoryDid: '',
+      repositoryHandle: '',
+    })
+  }
+
+  // Load existing organizations on component mount
+  useEffect(() => {
+    if (organizationsQuery.data && organizationsQuery.data.length > 0) {
+      const existingOrgs: Repository[] = organizationsQuery.data.map(
+        (org: any) => ({
+          did: org.did,
+          handle: org.handle,
+          accessType: org.accessType,
+          permissions: {
+            read: org.permissions.read,
+            write: org.permissions.write
+          },
+          collaboratorCount: 1,
+        }),
+      )
+
+      // Add organizations that aren't already in the repository list
+      existingOrgs.forEach((org) => {
+        const exists = repositories.some(
+          (repo) => repo.did === org.did && repo.handle === org.handle,
+        )
+        if (!exists) {
+          addRepository(org)
+        }
+      })
+    }
+  }, [organizationsQuery.data, session?.did, repositories, addRepository])
+
+  // Start with empty state - users will create their own organizations
+
+  const createOrganization = async () => {
+    if (!newOrgName.trim() || !session?.did || !auth.agent) return
+
+    setLoading(true)
+    try {
+      // Create a new shared repository on the SDS server using proper lexicon call
+      const response = await retryApiCall(async () => {
+        console.log('[SDS Demo] Creating organization for user:', session.did)
+
+        const requestPayload = {
+          name: newOrgName.trim(),
+          description: newOrgDescription.trim() || undefined,
+          creatorDid: session.did,
+        }
+
+        console.log('[SDS Demo] Making organization creation request via agent...')
+        console.log('[SDS Demo] Request payload:', requestPayload)
+
+        // Use the SDS agent to make the call with proper lexicon routing
+        const agentResponse = await auth.agent.call(
+          'com.sds.organization.create',
+          undefined,
+          requestPayload
+        )
+
+        console.log('[SDS Demo] Organization created successfully:', agentResponse.data)
+        return agentResponse
+      })
+
+      if (!response?.data) {
+        throw new Error('No response data from organization creation')
+      }
+
+      const orgData = response.data
+
+      // Add the new organization to the local state
+      const newOrg: Repository = {
+        did: orgData.did,
+        handle: orgData.handle,
+        accessType: orgData.accessType || 'owner',
+        permissions: orgData.permissions || { read: true, write: true },
+        collaboratorCount: 1,
+      }
+
+      addRepository(newOrg)
+      setSelectedRepo(newOrg.did)
+      setNewOrgName('')
+      setNewOrgDescription('')
+      setShowCreateOrg(false)
+
+      alert(`Repository "${orgData.name}" created successfully!
+
+Handle: ${orgData.handle}
+You are the owner and can now invite collaborators to share this repository.`)
+    } catch (error: any) {
+      console.error('Error creating organization:', error)
+
+      // Check if this is an OAuth/authentication error
+      if (
+        error?.message?.includes('Invalid identifier or password') ||
+        error?.message?.includes('authentication') ||
+        error?.status === 401
+      ) {
+        alert(
+          'Authentication expired. Please sign out and sign back in to continue.',
+        )
+      } else {
+        alert(
+          `Failed to create repository: ${error?.message || 'Unknown error'}. Please try again.`,
+        )
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const createPost = async (repoDid: string) => {
+    if (!newPostText.trim()) return
+
+    setLoading(true)
+    try {
+      // In a real app, this would call the SDS API
+      // await agent.com.atproto.repo.createRecord({
+      //   repo: repoDid,
+      //   collection: 'app.bsky.feed.post',
+      //   record: {
+      //     text: newPostText,
+      //     createdAt: new Date().toISOString(),
+      //   },
+      // })
+
+      console.log(`Creating post in ${repoDid}:`, newPostText)
+      setNewPostText('')
+      alert(`Post created successfully in ${repoDid}!`)
+    } catch (error) {
+      console.error('Error creating post:', error)
+      alert('Error creating post. Check console for details.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Debug Info */}
+      <CollaborationDebug />
+
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold text-gray-900">Your Shared Repositories</h2>
+        <div className="flex items-center space-x-4">
+          <div className="text-sm text-gray-500">
+            {repositories.length} repositories
+          </div>
+          <Button
+            onClick={() => setShowCreateOrg(true)}
+            size="small"
+            disabled={loading}
+          >
+            Create Repository
+          </Button>
+        </div>
+      </div>
+
+      {/* Create Shared Repository Modal */}
+      {showCreateOrg && (
+        <div className="rounded-lg border border-gray-300 bg-gray-50 p-4">
+          <h3 className="mb-4 text-lg font-medium text-gray-900">
+            Create Shared Repository
+          </h3>
+          <p className="mb-4 text-sm text-gray-600">
+            Create a new repository on the SDS that you own and can share with collaborators.
+          </p>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700">
+                Repository Name *
+              </label>
+              <input
+                type="text"
+                value={newOrgName}
+                onChange={(e) => setNewOrgName(e.target.value)}
+                placeholder="Enter repository name"
+                className="mt-1 w-full rounded-lg border border-gray-300 p-2 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">
+                Description (optional)
+              </label>
+              <textarea
+                value={newOrgDescription}
+                onChange={(e) => setNewOrgDescription(e.target.value)}
+                placeholder="Describe your repository"
+                rows={3}
+                className="mt-1 w-full rounded-lg border border-gray-300 p-2 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex space-x-2">
+              <Button
+                onClick={createOrganization}
+                disabled={!newOrgName.trim() || loading}
+                size="small"
+              >
+                {loading ? <Spinner /> : 'Create Repository'}
+              </Button>
+              <Button
+                onClick={() => {
+                  setShowCreateOrg(false)
+                  setNewOrgName('')
+                  setNewOrgDescription('')
+                }}
+                size="small"
+                disabled={loading}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Empty State */}
+      {repositories.length === 0 && !showCreateOrg && (
+        <div className="rounded-lg border-2 border-dashed border-gray-300 p-8 text-center">
+          <div className="mx-auto mb-4 h-12 w-12 text-gray-400">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
+              />
+            </svg>
+          </div>
+          <h3 className="mb-2 text-lg font-medium text-gray-900">
+            No shared repositories yet
+          </h3>
+          <p className="mb-4 text-gray-500">
+            Create your first shared repository to start collaborating with others.
+          </p>
+          <Button onClick={() => setShowCreateOrg(true)}>
+            Create Your First Repository
+          </Button>
+        </div>
+      )}
+
+      {/* Repository List */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {repositories.map((repo) => (
+          <RepositoryCard
+            key={repo.did}
+            repository={repo}
+            isSelected={selectedRepo === repo.did}
+            onSelect={() => setSelectedRepo(repo.did)}
+            onManageCollaborators={() => openCollaborationModal(repo.did, repo.handle)}
+          />
+        ))}
+      </div>
+
+      {/* Content Creation Panel */}
+      {selectedRepo && (
+        <div className="rounded-lg bg-gray-50 p-4">
+          <h4 className="mb-3 font-medium text-gray-900">
+            Create Content in{' '}
+            {repositories.find((r) => r.did === selectedRepo)?.handle}
+          </h4>
+
+          {repositories.find((r) => r.did === selectedRepo)?.permissions
+            .write ? (
+            <div className="space-y-3">
+              <textarea
+                value={newPostText}
+                onChange={(e) => setNewPostText(e.target.value)}
+                placeholder="What's happening?"
+                className="w-full rounded-lg border border-gray-300 p-3 focus:border-blue-500 focus:outline-none"
+                rows={3}
+              />
+              <div className="flex justify-end">
+                <Button
+                  onClick={() => createPost(selectedRepo)}
+                  disabled={loading || !newPostText.trim()}
+                  className="bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  {loading ? <Spinner className="mr-2 h-4 w-4" /> : null}
+                  Post
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg bg-yellow-50 p-3 text-yellow-800">
+              <p>You have read-only access to this repository.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!selectedRepo && (
+        <div className="rounded-lg bg-gray-50 p-6 text-center text-gray-500">
+          <p>Select a repository to view details and create content</p>
+        </div>
+      )}
+
+      {/* Collaboration Modal */}
+      <CollaborationModal
+        isOpen={collaborationModal.isOpen}
+        onClose={closeCollaborationModal}
+        repositoryDid={collaborationModal.repositoryDid}
+        repositoryHandle={collaborationModal.repositoryHandle}
+      />
+    </div>
+  )
+}

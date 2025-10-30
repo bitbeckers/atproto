@@ -1,6 +1,7 @@
 import './env'
 import { generateMockSetup } from './mock'
 import { TestNetwork } from './network'
+import { TestSds } from './sds'
 import { mockMailer } from './util'
 
 const run = async () => {
@@ -37,13 +38,23 @@ const run = async () => {
   mockMailer(network.pds)
   await generateMockSetup(network)
 
+  // Start SDS server for organization management
+  // SDS acts as Resource Server only (no OAuth Provider)
+  // It validates tokens from any PDS using federated JWKS fetching
+
+  const sds = await TestSds.create({
+    port: 2585,
+    didPlcUrl: network.plc.url,
+  })
+
   if (network.introspect) {
     console.log(
       `🔍 Dev-env introspection server http://localhost:${network.introspect.port}`,
     )
   }
   console.log(`👤 DID Placeholder server http://localhost:${network.plc.port}`)
-  console.log(`🌞 Main PDS http://localhost:${network.pds.port}`)
+  console.log(`🌞 Main PDS (Users) http://localhost:${network.pds.port}`)
+  console.log(`🏢 SDS (Organizations) http://localhost:${sds.port}`)
   console.log(
     `🔨 Lexicon authority DID ${network.pds.ctx.cfg.lexicon.didAuthority}`,
   )
